@@ -1,7 +1,10 @@
 import os
+import sys
 import shutil
+import tempfile
 import threading
 import queue
+import tkinter.font as tkfont
 import customtkinter as ctk
 from PIL import Image, ImageDraw
 
@@ -77,14 +80,78 @@ def fade(color, amount):
     return f"#{r:02x}{g:02x}{b:02x}"
 
 
-def make_banner(width, height, radius=30):
-    """Bandeau dégradé bleu avec coins du bas arrondis."""
+def resource_path(rel):
+    """Chemin d'un fichier fourni avec le programme (dans le script comme dans l'exe)."""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, rel)
+
+
+LOGO_PATH = resource_path(os.path.join("assets", "img", "logo_spaceo.png"))
+LOGO_FRACS = [0.52, 0.28, 0.20]
+
+
+def logo_ring(size, colors=("#FFFFFF", "#BFE3FF", "#F2C94C"), thick=0.2, gap=7):
+    """Petit anneau en 3 parts : c'est le logo de Spaceo."""
+    k = 4
+    S = size * k
+    w = int(S * thick)
+    img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    box = [0, 0, S - 1, S - 1]
+    start = -90.0
+    for frac, col in zip(LOGO_FRACS, colors):
+        end = start + frac * 360.0
+        d.arc(box, start + gap / 2, end - gap / 2, fill=col, width=w)
+        start = end
+    return img.resize((size, size), Image.LANCZOS)
+
+
+def logo_icon(size=256):
+    """Icône de l'application : carré arrondi bleu avec l'anneau au centre."""
+    c1, c2 = hex_to_rgb("#56B4F5"), hex_to_rgb("#1F66C9")
+    grad = Image.new("RGB", (size, size))
+    d = ImageDraw.Draw(grad)
+    for y in range(size):
+        t = y / max(size - 1, 1)
+        d.line([(0, y), (size, y)], fill=tuple(int(c1[i] + (c2[i] - c1[i]) * t) for i in range(3)))
+    k = 4
+    mask = Image.new("L", (size * k, size * k), 0)
+    ImageDraw.Draw(mask).rounded_rectangle([0, 0, size * k - 1, size * k - 1],
+                                           radius=int(size * 0.22 * k), fill=255)
+    mask = mask.resize((size, size), Image.LANCZOS)
+    out = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    out.paste(grad, (0, 0), mask)
+    ring = logo_ring(int(size * 0.64))
+    off = (size - ring.width) // 2
+    out.alpha_composite(ring, (off, off))
+    return out
+
+
+def load_logo(size):
+    """Charge assets/img/logo_spaceo.png (si absent, redessine le logo à la place)."""
+    try:
+        img = Image.open(LOGO_PATH).convert("RGBA")
+    except Exception:
+        img = logo_icon(256)
+    return img.resize((size, size), Image.LANCZOS)
+
+
+def save_ico(path):
+    load_logo(256).save(path, format="ICO",
+                        sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
+
+
+def make_banner(width, height, radius=30, logo_x=None, logo_size=58):
+    """Bandeau dégradé bleu avec coins du bas arrondis (et le logo à gauche du titre)."""
     c1, c2 = hex_to_rgb("#1F66C9"), hex_to_rgb("#56B4F5")
     grad = Image.new("RGB", (width, height))
     d = ImageDraw.Draw(grad)
     for x in range(width):
         t = x / max(width - 1, 1)
         d.line([(x, 0), (x, height)], fill=tuple(int(c1[i] + (c2[i] - c1[i]) * t) for i in range(3)))
+    if logo_x is not None:
+        logo = load_logo(logo_size)
+        grad.paste(logo, (int(logo_x), (height - logo_size) // 2), logo)
     mask = Image.new("L", (width * 3, height * 3), 0)
     ImageDraw.Draw(mask).rounded_rectangle(
         [0, -radius * 3, width * 3, height * 3 - 1], radius=radius * 3, fill=255)
@@ -139,7 +206,13 @@ class App(ctk.CTk):
         self.legend_rows = {}
 
         # --- Bandeau ---
-        banner = ctk.CTkLabel(self, text="Spaceo", image=make_banner(WIN_W, 92),
+        try:
+            text_w = tkfont.Font(family=FONT, size=-32, weight="bold").measure("Spaceo")
+        except Exception:
+            text_w = 140
+        logo_size, gap = 58, 14
+        logo_x = WIN_W / 2 - text_w / 2 - gap - logo_size
+        banner = ctk.CTkLabel(self, text="Spaceo", image=make_banner(WIN_W, 92, logo_x=logo_x, logo_size=logo_size),
                               compound="center", font=(FONT, 32, "bold"), text_color="white",
                               fg_color="transparent")
         banner.pack()
@@ -221,6 +294,21 @@ class App(ctk.CTk):
 
         self.on_drive_change()
         self.after(150, self.poll)
+        self.after(300, self.set_icon)   # après customtkinter, qui pose sa propre icône
+
+    def set_icon(self):
+        try:
+            path = os.path.join(tempfile.gettempdir(), "spaceo_icon.ico")
+            if not os.path.exists(path):
+                save_ico(path)
+            self.iconbitmap(path)
+        except Exception:
+            try:
+                from PIL import ImageTk
+                self._icon = ImageTk.PhotoImage(load_logo(64))
+                self.iconphoto(True, self._icon)
+            except Exception:
+                pass
 
     # ---------- Disque ----------
     def on_drive_change(self):
@@ -373,4 +461,7 @@ class App(ctk.CTk):
 
 
 if __name__ == "__main__":
-    App().mainloop()
+    if len(sys.argv) > 2 and sys.argv[1] == "--make-icon":
+        save_ico(sys.argv[2])          # utilisé par GitHub pour fabriquer l'icône de l'exe
+    else:
+        App().mainloop()
